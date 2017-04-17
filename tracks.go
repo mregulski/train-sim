@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 )
 
 // Track - a connection between 2 nodes
@@ -69,5 +69,7 @@ func transitTrackFromJSON(rawTrack map[string]*json.RawMessage, nodes []*Node) T
 	json.Unmarshal(*rawTrack["maxSpeed"], &track.MaxSpeed)
 	track.A = nodes[a-1]
 	track.B = nodes[b-1]
+	track.A.Tracks = append(track.A.Tracks, &track)
+	track.B.Tracks = append(track.B.Tracks, &track)
 	return &track
 }
