@@ -17,12 +17,15 @@ type Network struct {
 	Vehicles []*Vehicle
 }
 
-type Place interface {
+const TimeScale time.Duration = 1.0
+
+type Location interface {
 	IsAvailable() bool
 	User() *Vehicle
 	Leave()
-	Take(vehicle *Vehicle)
-	TravelTime(speed float64) time.Duration
+	Take(vehicle *Vehicle) bool
+	TravelTime(speed float64) int
+	Name() string
 }
 
 func (network *Network) String() string {

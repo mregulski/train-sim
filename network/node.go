@@ -16,19 +16,20 @@ type Station struct {
 
 // Node is the basic node of the network
 type Node struct {
-	ID            int64
+	ID            int
 	WaitTime      float64
 	Tracks        map[trackKey][]Track
 	m             *sync.Mutex
 	activeVehicle *Vehicle
+	station       *Station
 }
 
 type trackKey2D struct {
-	idA int64
-	idB int64
+	idA int
+	idB int
 }
 
-type trackKey int64
+type trackKey int
 
 func (n *Node) IsAvailable() bool {
 	n.m.Lock()
@@ -48,16 +49,23 @@ func (n *Node) Leave() {
 	n.activeVehicle = nil
 }
 
-func (n *Node) Take(vehicle *Vehicle) {
+func (n *Node) Take(vehicle *Vehicle) bool {
 	n.m.Lock()
 	defer n.m.Unlock()
-	n.activeVehicle = vehicle
+	if n.activeVehicle == nil {
+		n.activeVehicle = vehicle
+		return true
+	}
+	return n.activeVehicle == vehicle
 }
 
-func (n *Node) TravelTime(speed float64) float64 {
-	return n.WaitTime
+func (n *Node) TravelTime(speed float64) int {
+	return int(n.WaitTime)
 }
 
+func (n *Node) Name() string {
+	return fmt.Sprintf("<%s:%d>", n.ID, n.station.Name)
+}
 
 func (n *Node) String() string {
 	return fmt.Sprintf("%+v", *n)
@@ -71,7 +79,7 @@ func (s Station) String() string {
 // Returns first available track or nil if all are taken
 func (s *Station) GetFreeTrack() Track {
 	for _, track := range s.A.Tracks[trackKey(s.B.ID)] {
-		if track.(Place).IsAvailable() {
+		if track.(Location).IsAvailable() {
 			return track
 		}
 	}
@@ -87,5 +95,7 @@ func stationFromJSON(rawStation map[string]*json.RawMessage, nodes []*Node) *Sta
 	json.Unmarshal(*rawStation["name"], &station.Name)
 	station.A = nodes[a-1]
 	station.B = nodes[b-1]
+	station.A.station = &station
+	station.B.station = &station
 	return &station
 }

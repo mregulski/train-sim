@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 	"math"
 )
 
@@ -50,15 +49,23 @@ func (t *TransitTrack) Leave() {
 	t.activeVehicle = nil
 }
 
-func (t *TransitTrack) Take(vehicle *Vehicle) {
+func (t *TransitTrack) Take(vehicle *Vehicle) bool {
 	t.m.Lock()
 	defer t.m.Unlock()
-	t.activeVehicle = vehicle
+	if (t.activeVehicle == nil) {
+		t.activeVehicle = vehicle
+		return true
+	}
+	return t.activeVehicle == vehicle
 }
 
-func (t *TransitTrack) TravelTime(speed float64) time.Duration {
+func (t *TransitTrack) TravelTime(speed float64) int {
 	speed = math.Max(t.MaxSpeed, speed)
-	return time.Duration(int(t.Length/speed))
+	return int(t.Length/speed)
+}
+
+func (t *TransitTrack) Name() string {
+	return fmt.Sprintf("<%s>", t.id)
 }
 
 func (t *TransitTrack) String() string {

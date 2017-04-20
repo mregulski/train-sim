@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	network "github.com/mregulski/ppt-6-concurrent/network"
+	"strings"
 )
 
 func main() {
@@ -26,8 +27,13 @@ func main() {
 		// var input string
 		in := bufio.NewReader(os.Stdin)
 		for {
-			line, _ := in.ReadString('\n')
-			log.Print("User:", line)
+			line, err := in.ReadString('\n')
+			if err != nil {
+				log.Println("[user] error reading user input:", err)
+				continue
+			}
+			line = strings.TrimSpace(line)
+			log.Printf("[user] '%s'\n", line)
 			userInput <- line
 		}
 	}()
@@ -37,14 +43,16 @@ func main() {
 func supervisor(graph network.Network, userInput <-chan string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	queue := make(chan network.Event)
-	vehicleControllers := make([]chan interface{}, len(graph.Vehicles))
-
+	vehicleControllers := make([]chan string, len(graph.Vehicles))
+	l := log.New(os.Stdout, "[supervisor] ", 0)
 	for i, v := range graph.Vehicles {
 		wg.Add(1)
-		vehicleControllers[i] = make(chan interface{})
+		vehicleControllers[i] = make(chan string)
 		station := graph.GetStation(v.Route[0])
-		v.UpdatePosition(station.GetFreeTrack().(network.Place))
-		go v.Start(vehicleControllers[i], queue, wg)
+		start := station.GetFreeTrack().(network.Location)
+		start.Take(v)
+		go v.Start(start, vehicleControllers[i], queue, wg)
+		// break // TODO: REMOVE
 	}
 	for {
 		select {
@@ -53,6 +61,10 @@ func supervisor(graph network.Network, userInput <-chan string, wg *sync.WaitGro
 		case cmd := <-userInput:
 			for _, recv := range vehicleControllers {
 				recv <- cmd
+			}
+			if cmd == "quit" {
+				l.Printf("received '%s' - stopping simulation\n", cmd)
+				return
 			}
 		}
 	}

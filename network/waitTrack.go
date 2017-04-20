@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 )
 
 // WaitTrack is a Track used for waiting for passengers
@@ -50,14 +49,22 @@ func (t *WaitTrack) Leave() {
 	t.activeVehicle = nil
 }
 
-func (t *WaitTrack) Take(vehicle *Vehicle) {
+func (t *WaitTrack) Take(vehicle *Vehicle) bool {
 	t.m.Lock()
 	defer t.m.Unlock()
-	t.activeVehicle = vehicle
+	if (t.activeVehicle == nil) {
+		t.activeVehicle = vehicle
+		return true
+	}
+	return t.activeVehicle == vehicle
 }
 
-func (t *WaitTrack) TravelTime(speed float64) time.Duration {
-	return time.Duration(t.WaitTime)
+func (t *WaitTrack) TravelTime(speed float64) int {
+	return int(t.WaitTime)
+}
+
+func (t *WaitTrack) Name() string {
+	return fmt.Sprintf("<%s>", t.id)
 }
 
 func (t *WaitTrack) String() string {
@@ -66,8 +73,8 @@ func (t *WaitTrack) String() string {
 }
 
 func waitTrackFromJSON(rawTrack map[string]*json.RawMessage, nodes []*Node) Track {
-	var a int64
-	var b int64
+	var a int
+	var b int
 	var track WaitTrack
 	json.Unmarshal(*rawTrack["a"], &a)
 	json.Unmarshal(*rawTrack["b"], &b)
