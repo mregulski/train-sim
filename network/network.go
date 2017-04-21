@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"log"
 	"sync"
-	"time"
 )
 
 // Network - complete simulation network
@@ -17,7 +16,25 @@ type Network struct {
 	Vehicles []*Vehicle
 }
 
-const TimeScale time.Duration = 1.0
+type configuration struct {
+	TimeScale int `json:"timeScale"`
+}
+
+var config *configuration
+var logging bool
+
+func SetLogging(isEnabled bool) {
+	logging = isEnabled
+}
+
+
+func GetLogging() bool {
+	return logging
+}
+
+func GetConfig() configuration {
+	return *config
+}
 
 type Location interface {
 	IsAvailable() bool
@@ -59,9 +76,12 @@ and we want them to be referenced directly in the Network object
 func (network *Network) UnmarshalJSON(s []byte) error {
 	var x map[string]*json.RawMessage
 	json.Unmarshal(s, &x)
+	config = &configuration{}
+	if err := json.Unmarshal(*x["config"], config); err != nil {
+		log.Fatal(err.Error())
+	}
 	if err := json.Unmarshal(*x["nodes"], &network.Nodes); err != nil {
 		log.Fatal(err.Error())
-		return err
 	}
 	for _, node := range network.Nodes {
 		node.Tracks = make(map[trackKey][]Track)
@@ -70,7 +90,6 @@ func (network *Network) UnmarshalJSON(s []byte) error {
 	var rawTracks []map[string]*json.RawMessage
 	if err := json.Unmarshal(*x["tracks"], &rawTracks); err != nil {
 		log.Fatal(err.Error())
-		return err
 	}
 	network.Tracks = make(map[trackKey2D][]Track)
 	for _, rawTrack := range rawTracks {
@@ -90,7 +109,6 @@ func (network *Network) UnmarshalJSON(s []byte) error {
 	var rawStations []map[string]*json.RawMessage
 	if err := json.Unmarshal(*x["stations"], &rawStations); err != nil {
 		log.Fatal(err.Error())
-		return err
 	}
 	for _, rawStation := range rawStations {
 		network.Stations = append(network.Stations, stationFromJSON(rawStation, network.Nodes))
@@ -99,7 +117,6 @@ func (network *Network) UnmarshalJSON(s []byte) error {
 	var rawVehicles []map[string]*json.RawMessage
 	if err := json.Unmarshal(*x["vehicles"], &rawVehicles); err != nil {
 		log.Fatal(err.Error())
-		return err
 	}
 
 	for _, rawVehicle := range rawVehicles {
@@ -107,4 +124,4 @@ func (network *Network) UnmarshalJSON(s []byte) error {
 			vehicleFromJSON(rawVehicle, network.Nodes))
 	}
 	return nil
-}
+}	

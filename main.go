@@ -9,16 +9,22 @@ import (
 
 	network "github.com/mregulski/ppt-6-concurrent/network"
 	"strings"
+	"flag"
 )
 
+var logging = true
+
 func main() {
+	fInteractive := flag.Bool("interactive", false, "if present, runs n interactive mode (no logging)")
+	flag.Parse()
+	logging = !*fInteractive
 	net := network.Network{}
+	network.SetLogging(logging)
 	if err := net.LoadFromJSONFile("network.json"); err != nil {
 		log.Fatal(err)
 		os.Exit(1)
 	}
-	fmt.Println(net)
-
+	fmt.Println(net)	
 	wg := &sync.WaitGroup{}
 	userInput := make(chan string)
 	wg.Add(1)
@@ -52,18 +58,23 @@ func supervisor(graph network.Network, userInput <-chan string, wg *sync.WaitGro
 		start := station.GetFreeTrack().(network.Location)
 		start.Take(v)
 		go v.Start(start, vehicleControllers[i], queue, wg)
-		// break // TODO: REMOVE
 	}
 	for {
 		select {
 		case msg := <-queue:
 			log.Println(msg)
 		case cmd := <-userInput:
-			for _, recv := range vehicleControllers {
-				recv <- cmd
+			if cmd == "list" {
+				for _, v := range graph.Vehicles {
+					fmt.Printf("{ID: %d, position: %s}\n", v.ID, v.LocationName()	)
+				}
 			}
 			if cmd == "quit" {
 				l.Printf("received '%s' - stopping simulation\n", cmd)
+				for _, recv := range vehicleControllers {
+					recv <- cmd
+						
+				}
 				return
 			}
 		}

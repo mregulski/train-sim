@@ -12,7 +12,7 @@ type TrackCollection []Track
 
 func (tc TrackCollection) GetFreeTrack() Track {
 	for _, track := range tc {
-		if track.(Location).IsAvailable() {
+		if track.IsAvailable() {
 			return track
 		}
 	}

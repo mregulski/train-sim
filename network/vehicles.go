@@ -3,6 +3,7 @@ package network
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -34,6 +35,10 @@ func (v Vehicle) String() string {
 		v.ID, v.MaxSpeed, v.Capacity, sRoute)
 }
 
+func (v *Vehicle) LocationName() string {
+	return v.position.Name()
+}
+
 func (v *Vehicle) UpdatePosition(newLocation Location) {
 	for {
 		if newLocation.Take(v) {
@@ -44,7 +49,7 @@ func (v *Vehicle) UpdatePosition(newLocation Location) {
 			v.position = newLocation
 			return
 		}
-		wait := time.Millisecond * time.Duration(rand.Intn(10)) * TimeScale
+		wait := ScaledTime(rand.Intn(10)) //)time.Millisecond * time.Duration(rand.Intn(10)) * time.Duration(GetConfig().TimeScale)
 		v.log.Printf("Destination %s not available, sleeping %s", newLocation.Name(), wait)
 		time.Sleep(wait)
 	}
@@ -74,24 +79,34 @@ func (v *Vehicle) NextLocation() Location {
 		if len(tracks) == 0 {
 			v.log.Fatalf("No tracks found between <%d> and <%d>\n", pos.ID, target.ID)
 		}
-		destination = tracks.GetFreeTrack()
+		for {
+			destination = tracks.GetFreeTrack()
+			if destination != nil {
+				break
+			}
+			v.log.Printf("No free track between %s and %s, waiting...\n", pos.Name(), target.Name())
+		}
 	}
 
 	return destination
+}
+
+func ScaledTime(baseTime int) time.Duration {
+	return time.Millisecond * time.Duration(baseTime*GetConfig().TimeScale)
 }
 
 /*
 DoRound - simulate vehicle's behaviour for a round
 */
 func (v *Vehicle) DoRound() error {
-	var eta = time.Duration(v.position.TravelTime(v.MaxSpeed)) * time.Millisecond
+	var eta = ScaledTime(v.position.TravelTime(v.MaxSpeed))
 	time.Sleep(eta)
 
 	destination := v.NextLocation()
 	v.UpdatePosition(destination)
 
 	v.log.Println(v.lastPosition.Name(), "->", v.position.Name())
-	
+
 	return nil
 }
 
@@ -106,9 +121,9 @@ func (v *Vehicle) Start(start Location, controller <-chan string, queue chan Eve
 	for {
 		select {
 		case cmd := <-controller:
-			v.log.Printf("[info] Received: '%s'\n", cmd)
+			log.Printf("[info] Received: '%s'\n", cmd)
 			if cmd == "quit" {
-				v.log.Printf("[cmd] %s - stopping the vehicle\n", cmd)
+				log.Printf("[cmd] %s - stopping the vehicle\n", cmd)
 				return
 			}
 		default:
@@ -129,5 +144,16 @@ func vehicleFromJSON(rawVehicle map[string]*json.RawMessage, nodes []*Node) *Veh
 	}
 	vehicle.lastPosition = vehicle.Route[0]
 	vehicle.log = log.New(os.Stdout, fmt.Sprintf("[vehicle:%d] ", vehicle.ID), log.Ltime|log.Lmicroseconds)
+	if !logging {
+		vehicle.log.SetOutput(ioutil.Discard)
+	}
 	return &vehicle
 }
+
+type NopLogger struct {
+	*log.Logger
+}
+
+func (l *NopLogger) Print(v ...interface{})                 { /*nop*/ }
+func (l *NopLogger) Printf(format string, v ...interface{}) { /*nop*/ }
+func (l *NopLogger) Println(v ...interface{})               { /*nop*/ }

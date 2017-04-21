@@ -9,9 +9,9 @@ import (
 // Station - named node for the routes
 // Consists of 2 switchers connected by WaitTracks
 type Station struct {
-	A    *Node  `json:"a"`
-	B    *Node  `json:"b"`
-	Name string `json:"name"`
+	A    *Node
+	B    *Node
+	Name string
 }
 
 // Node is the basic node of the network
@@ -60,11 +60,14 @@ func (n *Node) Take(vehicle *Vehicle) bool {
 }
 
 func (n *Node) TravelTime(speed float64) int {
-	return int(n.WaitTime)
+	return int(n.WaitTime / 60)
 }
 
 func (n *Node) Name() string {
-	return fmt.Sprintf("<%s:%d>", n.ID, n.station.Name)
+	if n.station == nil {
+		return fmt.Sprintf("<node:%d>", n.ID)
+	}
+	return fmt.Sprintf("<%s:%d>", n.station.Name, n.ID)
 }
 
 func (n *Node) String() string {
