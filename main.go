@@ -1,82 +1,48 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
-	"log"
-	"os"
-	"sync"
-
 	network "github.com/mregulski/ppt-6-concurrent/network"
-	"strings"
-	"flag"
+	"log"
+	"sync"
 )
 
-var logging = true
-
 func main() {
-	fInteractive := flag.Bool("interactive", false, "if present, runs n interactive mode (no logging)")
-	flag.Parse()
-	logging = !*fInteractive
-	net := network.Network{}
-	network.SetLogging(logging)
-	if err := net.LoadFromJSONFile("network.json"); err != nil {
+	var graph *network.Graph
+	log.SetFlags(log.LstdFlags|log.Lmicroseconds)
+	if net, err := network.LoadGraph("network.json"); err != nil {
 		log.Fatal(err)
-		os.Exit(1)
+	} else {
+		graph = net
 	}
-	fmt.Println(net)	
+	log.Printf("%+v\n", graph.Config)
 	wg := &sync.WaitGroup{}
-	userInput := make(chan string)
 	wg.Add(1)
-	go supervisor(net, userInput, wg)
-	go func() {
-		// var input string
-		in := bufio.NewReader(os.Stdin)
-		for {
-			line, err := in.ReadString('\n')
-			if err != nil {
-				log.Println("[user] error reading user input:", err)
-				continue
-			}
-			line = strings.TrimSpace(line)
-			log.Printf("[user] '%s'\n", line)
-			userInput <- line
+	go graph.InfoHandler()
+
+	for _, junction := range graph.Junctions {
+		wg.Add(1)
+		go network.Handle(junction, graph)
+	}
+
+    visited := make(map[network.TrackKeyType]bool)
+	for k, tracks := range graph.Tracks {
+        if (visited[network.TrackKeyType{k.A,k.B}] || visited[network.TrackKeyType{k.B,k.A}]) {
+            continue
+        }
+		for _, track := range tracks {
+			wg.Add(1)
+			go network.Handle(track, graph)
 		}
-	}()
+        visited[k] = true
+	}
+
+
+	for i := 0; i < len(graph.Vehicles); i++ {
+		wg.Add(1)
+		go graph.Vehicles[i].Handle(graph)
+	}
+
+	// go graph.Vehicles[5].Handle(graph)
 	wg.Wait()
 }
 
-func supervisor(graph network.Network, userInput <-chan string, wg *sync.WaitGroup) {
-	defer wg.Done()
-	queue := make(chan network.Event)
-	vehicleControllers := make([]chan string, len(graph.Vehicles))
-	l := log.New(os.Stdout, "[supervisor] ", 0)
-	for i, v := range graph.Vehicles {
-		wg.Add(1)
-		vehicleControllers[i] = make(chan string)
-		station := graph.GetStation(v.Route[0])
-		start := station.GetFreeTrack().(network.Location)
-		start.Take(v)
-		go v.Start(start, vehicleControllers[i], queue, wg)
-	}
-	for {
-		select {
-		case msg := <-queue:
-			log.Println(msg)
-		case cmd := <-userInput:
-			if cmd == "list" {
-				for _, v := range graph.Vehicles {
-					fmt.Printf("{ID: %d, position: %s}\n", v.ID, v.LocationName()	)
-				}
-			}
-			if cmd == "quit" {
-				l.Printf("received '%s' - stopping simulation\n", cmd)
-				for _, recv := range vehicleControllers {
-					recv <- cmd
-						
-				}
-				return
-			}
-		}
-	}
-}

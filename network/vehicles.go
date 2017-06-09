@@ -2,158 +2,202 @@ package network
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"math/rand"
-	"os"
-	"sync"
+	"strconv"
 	"time"
 )
 
-type Vehicle struct {
-	ID            int
-	MaxSpeed      float64
-	Capacity      int // not used yet
-	Route         []*Node
-	position      Location      // current Place occupied by this Vehicle
-	lastPosition  Location      // last Place visited
-	routePosition int           // last visited node on the route
-	ctrl          <-chan string // channel for receiving commands
-	log           *log.Logger
+type Vehicle interface {
+	// MaxSpeed is vehicle's max possible speed, in km/h
+	MaxSpeed() float64
+	// Handle implements the vehicle's logic and communication with network elements
+	Handle(graph *Graph)
 }
 
-func (v Vehicle) String() string {
-	var sRoute string
-	for i, node := range v.Route {
-		sRoute += fmt.Sprintf("%d", node.ID)
-		if i < len(v.Route)-1 {
-			sRoute += fmt.Sprintf("->")
-		}
-	}
-	return fmt.Sprintf("{ID: %d, MaxSpeed: %f, Capacity: %d, route: %s}",
-		v.ID, v.MaxSpeed, v.Capacity, sRoute)
+type BaseVehicle struct {
+	ID       int
+	maxSpeed float64 // in km/h
+	comm     chan bool
 }
 
-func (v *Vehicle) LocationName() string {
-	return v.position.Name()
+// Train is a basic vehicle travelling through the network along a predefined route
+type Train struct {
+	BaseVehicle
+	Route    []*Junction
+	capacity int
+	accident chan bool
+	requests chan request
+	routeIdx int
 }
 
-func (v *Vehicle) UpdatePosition(newLocation Location) {
+func (v *BaseVehicle) MaxSpeed() float64 {
+	return v.maxSpeed
+}
+
+func (t *Train) GetRequestChannel() chan<- request {
+	return t.requests
+}
+
+func (t *Train) GetRWRequestChannel() chan request {
+	return t.requests
+}
+
+func (v *BaseVehicle) request(target requestHandler, req requestType) bool {
+	target.GetRequestChannel() <- request{v.comm, v.ID, req}
+	return <-v.comm
+}
+
+func (t *Train) Handle(context *Graph) {
+	var position Location
+	stop := make(chan bool)
+	go context.generateFailures(t.requests, stop)
+	laps := 0
+	failure := false
 	for {
-		if newLocation.Take(v) {
-			if v.position != nil {
-				v.position.Leave()
-			}
-			v.lastPosition = v.position
-			v.position = newLocation
-			return
+		select {
+		case <-t.requests:
+		 	t.logf("FAILURE, requesting help to %s", position.Name())
+			stop <- true
+			context.Emergency <- emergency{location: position, handler: t}
+			failure = true
+			// req.re
+		default:
+			//do notihng
 		}
-		wait := ScaledTime(rand.Intn(10)) //)time.Millisecond * time.Duration(rand.Intn(10)) * time.Duration(GetConfig().TimeScale)
-		v.log.Printf("Destination %s not available, sleeping %s", newLocation.Name(), wait)
-		time.Sleep(wait)
+		if failure {
+			var req request
+			req =<- t.requests
+			for req.kind != repairStart {
+				req.c <- false
+				req = <-t.requests
+			}
+			req.c <- true
+			req =<- t.requests
+			for req.kind != repairDone {
+				req.c <- false
+				req = <-t.requests
+			}
+			req.c <- true
+			failure = false
+		} else {
+			var next Location
+			if position == nil {
+				next = t.initialPosition()
+				t.logf("Starting position: %s", next.Name())
+			} else {
+				next = t.next(position, context.waitTime)
+				// t.logf("Next destination: %s", next.Name())
+			}
+			for {
+				t.logf("Requesting entry: %s", next.Name())
+				ok := t.request(next, take)
+				if !ok {
+					t.logf("Entry denied")
+					delay := context.waitTime()
+					if failing := t.request(next, check); failing {
+						t.logf("Destination offline, retrying after %v", delay)
+					} else {
+						t.logf("Destination busy (%d), retrying after %v", next.Occupant(), delay)
+					}
+
+					<-time.After(delay)
+					continue
+				} else {
+					break
+				}
+			}
+			if position != nil {
+				for !t.request(position, free) {
+					t.logf("Unable to leave current location: %s", position)
+					<-time.After(context.waitTime())
+
+				}
+			}
+			position = next
+			// get through current poistion
+			travelTime := context.scaledTime(position.TravelTime(t.maxSpeed))
+			t.logf("Travelling %s, eta: %v", position.Name(), travelTime)
+			<-time.After(travelTime)
+			if position == t.Route[0] {
+				laps++
+				t.logf("Vehicle has completed its route (%d times so far)", laps)
+			}
+		}
 	}
-	v.log.Printf("new position: %s\n", newLocation.Name())
 }
 
-//NextLocation returns the vehicle's new position
-func (v *Vehicle) NextLocation() Location {
+func (v *BaseVehicle) logf(format string, args ...interface{}) {
+	prefix := fmt.Sprintf("\x1b[3"+strconv.Itoa(v.ID%9)+"m[Train #%d] ", v.ID)
+	log.Printf(prefix+format+"\x1b[39m", args...)
+}
+
+func (t *Train) initialPosition() Location {
+	return t.next(t.Route[0], nil)
+}
+
+func (t *Train) next(position Location, delay func() time.Duration) Location {
 	var destination Location
-	switch pos := v.position.(type) {
-	default:
-		v.log.Fatalf("Unexpected type %T\n", pos)
-		destination = pos
+	switch pos := position.(type) {
 	case Track:
-		// destination is the other end of the track
-		v.routePosition = (v.routePosition + 1) % len(v.Route)
-		ends := pos.EndPoints()
-		if v.lastPosition == ends[0] {
-			destination = ends[1]
-		} else {
-			destination = ends[0]
-		}
-	case *Node:
-		// destination is the first free track from current node to the next one on route
-		target := v.Route[(v.routePosition+1)%len(v.Route)]
-		tracks := TrackCollection(pos.Tracks[trackKey(target.ID)])
+		t.routeIdx = t.nextIdx()
+		destination = t.Route[t.routeIdx]
+	case *Junction:
+
+		target := t.Route[t.nextIdx()]
+		tracks := pos.Tracks[target.ID]
 		if len(tracks) == 0 {
-			v.log.Fatalf("No tracks found between <%d> and <%d>\n", pos.ID, target.ID)
+			t.logf("Malformed route: No tracks found between %s and %s\n",
+				pos.Name(), target.Name())
+			panic(errors.New("Malformed route. Check logs for details"))
 		}
 		for {
-			destination = tracks.GetFreeTrack()
-			if destination != nil {
+			if destination = findFreeTrack(tracks); destination != nil {
 				break
+			} else if delay != nil {
+				wait := delay()
+				t.logf("No free track between %s and %s, retrying after %v\n",
+					pos.Name(), target.Name(), wait)
+				<-time.After(wait)
 			}
-			v.log.Printf("No free track between %s and %s, waiting...\n", pos.Name(), target.Name())
 		}
 	}
-
 	return destination
 }
 
-func ScaledTime(baseTime int) time.Duration {
-	return time.Millisecond * time.Duration(baseTime*GetConfig().TimeScale)
+func (t *Train) nextIdx() int {
+	return (t.routeIdx + 1) % len(t.Route)
 }
 
-/*
-DoRound - simulate vehicle's behaviour for a round
-*/
-func (v *Vehicle) DoRound() error {
-	var eta = ScaledTime(v.position.TravelTime(v.MaxSpeed))
-	time.Sleep(eta)
+func vehicleFromJSON(raw map[string]*json.RawMessage, graph *Graph) Vehicle {
 
-	destination := v.NextLocation()
-	v.UpdatePosition(destination)
-
-	v.log.Println(v.lastPosition.Name(), "->", v.position.Name())
-
-	return nil
-}
-
-/*
-Start - begin simulation of this vehicle
-*/
-func (v *Vehicle) Start(start Location, controller <-chan string, queue chan Event, wg *sync.WaitGroup) {
-	v.position = start
-	v.log.Println("[info] Starting")
-	v.log.Printf("[info] Initial position: %s\n", v.position)
-	defer wg.Done()
-	for {
-		select {
-		case cmd := <-controller:
-			log.Printf("[info] Received: '%s'\n", cmd)
-			if cmd == "quit" {
-				log.Printf("[cmd] %s - stopping the vehicle\n", cmd)
-				return
-			}
-		default:
-			v.DoRound()
-		}
-	}
-}
-
-func vehicleFromJSON(rawVehicle map[string]*json.RawMessage, nodes []*Node) *Vehicle {
-	var routeIDs []int
+	var kind string
 	var vehicle Vehicle
-	json.Unmarshal(*rawVehicle["id"], &vehicle.ID)
-	json.Unmarshal(*rawVehicle["maxSpeed"], &vehicle.MaxSpeed)
-	json.Unmarshal(*rawVehicle["capacity"], &vehicle.Capacity)
-	json.Unmarshal(*rawVehicle["route"], &routeIDs)
+	json.Unmarshal(*raw["type"], &kind)
+	switch kind {
+	case "train":
+		vehicle = trainFromJSON(raw, graph.Junctions, graph.Config)
+	case "repair":
+		vehicle = repairFromJSON(raw, graph.allTracks(), graph.Config)
+	}
+	return vehicle
+}
+
+func trainFromJSON(raw map[string]*json.RawMessage, junctions []*Junction,
+	config *GraphConfig) *Train {
+
+	var routeIDs []int
+	var vehicle Train
+    log.Printf("wtf: %s", vehicle)
+	json.Unmarshal(*raw["id"], &vehicle.ID)
+	json.Unmarshal(*raw["maxSpeed"], &vehicle.maxSpeed)
+	json.Unmarshal(*raw["capacity"], &vehicle.capacity)
+	json.Unmarshal(*raw["route"], &routeIDs)
 	for _, nodeID := range routeIDs {
-		vehicle.Route = append(vehicle.Route, nodes[nodeID-1])
+		vehicle.Route = append(vehicle.Route, junctions[nodeID-1])
 	}
-	vehicle.lastPosition = vehicle.Route[0]
-	vehicle.log = log.New(os.Stdout, fmt.Sprintf("[vehicle:%d] ", vehicle.ID), log.Ltime|log.Lmicroseconds)
-	if !logging {
-		vehicle.log.SetOutput(ioutil.Discard)
-	}
+	vehicle.comm = make(chan bool)
+	// vehicle.config = config
 	return &vehicle
 }
-
-type NopLogger struct {
-	*log.Logger
-}
-
-func (l *NopLogger) Print(v ...interface{})                 { /*nop*/ }
-func (l *NopLogger) Printf(format string, v ...interface{}) { /*nop*/ }
-func (l *NopLogger) Println(v ...interface{})               { /*nop*/ }

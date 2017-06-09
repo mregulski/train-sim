@@ -2,126 +2,177 @@ package network
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"log"
-	"sync"
+	"math/rand"
+	"time"
+	"fmt"
 )
 
-// Network - complete simulation network
-type Network struct {
-	Nodes    []*Node
-	Stations []*Station
-	Tracks   map[trackKey2D][]Track
-	Vehicles []*Vehicle
+type TrackKeyType struct {
+	A, B int
 }
 
-type configuration struct {
-	TimeScale int `json:"timeScale"`
+type report struct {
+	delta int
+	key string
+}
+// Graph is the entire simulated network
+type Graph struct {
+	Config    *GraphConfig
+	Junctions []*Junction
+	Tracks    map[TrackKeyType][]Track
+	Stations  []*Station
+	Vehicles  []Vehicle
+	Emergency chan emergency
+	emergencyCtr chan report
+
 }
 
-var config *configuration
-var logging bool
-
-func SetLogging(isEnabled bool) {
-	logging = isEnabled
+type requestHandler interface {
+	GetRequestChannel() chan<- request
+	GetRWRequestChannel() chan request
 }
 
-
-func GetLogging() bool {
-	return logging
+// GraphConfig stores general configuration settings of the simulated network
+type GraphConfig struct {
+	TimeScale   float64 // number of milliseconds per simulated hour
+	RepairTime  float64 // in hours
+	FailureRate float64 // probability of a network element failure per hour
 }
 
-func GetConfig() configuration {
-	return *config
+func (graph *Graph) scaledTime(hours float64) time.Duration {
+	return time.Millisecond * time.Duration(graph.Config.TimeScale*hours)
 }
 
-type Location interface {
-	IsAvailable() bool
-	User() *Vehicle
-	Leave()
-	Take(vehicle *Vehicle) bool
-	TravelTime(speed float64) int
-	Name() string
+func (graph *Graph) waitTime() time.Duration {
+	return graph.scaledTime((float64(rand.Intn(30)) + 10.0) / 60)
 }
 
-func (network *Network) String() string {
-	return fmt.Sprintf("{\n Nodes: %+v,\n Tracks: %+v,\n Stations: %+v,\n Vehicles: %+v\n}", network.Nodes, network.Tracks, network.Stations, network.Vehicles)
+func (graph *Graph) repairTime() time.Duration {
+	return graph.scaledTime(graph.Config.RepairTime)
 }
 
-func (network *Network) GetStation(node *Node) *Station {
-	for _, station := range network.Stations {
-		if station.A == node || station.B == node {
-			return station
+// generateFailures randomly generates a failure event once an hour until it receives
+// a signal on stop channel
+func (graph *Graph) generateFailures(accident chan<- request, stop <-chan bool) {
+	ticker := time.NewTicker(graph.scaledTime(1.0))
+	<-time.After(graph.scaledTime(2.0))
+	for {
+		select {
+		case <-ticker.C:
+			if rand.Float64() < graph.Config.FailureRate {
+				accident <- request{nil, -1, fail}
+			}
+		case <-stop:
+			return
 		}
 	}
+}
+
+func (graph *Graph) InfoHandler() {
+	graph.emergencyCtr = make(chan report)
+	status := make(map[string]struct{})
+	activeEmergencies := 0
+	for {
+		report := <-graph.emergencyCtr
+		activeEmergencies += report.delta
+		if report.delta > 0 {
+			status[report.key] = struct{}{}
+		} else if report.delta < 0 {
+			delete(status, report.key)
+		}
+		emergencies := ""
+		for k := range status {
+			emergencies += fmt.Sprintf("%19s %s\n", "", k)
+		}
+		log.Printf("[Network] %d active emergencies: \n%s", activeEmergencies, emergencies)
+	}
+}
+
+
+// LoadGraph loads a Graph description from a JSON file
+func LoadGraph(filename string) (*Graph, error) {
+	raw, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	graph := Graph{}
+	if err = json.Unmarshal(raw, &graph); err != nil {
+		return nil, err
+	}
+	return &graph, nil
+}
+
+func (graph *Graph) allTracks() []Track {
+	list := make([]Track, 0)
+	for _, tracks := range graph.Tracks {
+		for _, track := range tracks {
+			list = append(list, track)
+		}
+	}
+	return list
+}
+
+func (graph *Graph) UnmarshalJSON(s []byte) error {
+
+	var raw map[string]json.RawMessage
+	json.Unmarshal(s, &raw)
+	if err := json.Unmarshal(raw["config"], &graph.Config); err != nil {
+		log.Panicln("Unable to unmarshal config data: ", err)
+	}
+	graph.loadJunctions(raw["junctions"])
+	graph.loadTracks(raw["tracks"])
+	graph.loadStations(raw["stations"])
+	graph.loadVehicles(raw["vehicles"])
+	graph.Emergency = make(chan emergency)
 	return nil
 }
 
-func (network *Network) LoadFromJSONFile(filename string) error {
-	raw, err := ioutil.ReadFile("network.json")
-	if err != nil {
-		log.Fatal(err.Error())
-		return err
+func (graph *Graph) loadJunctions(raw json.RawMessage) {
+	var rawJunctions []map[string]*json.RawMessage
+	if err := json.Unmarshal(raw, &rawJunctions); err != nil {
+		log.Panicln("Unable to unmarshal junction data: ", err)
 	}
-	err = json.Unmarshal(raw, network)
-	return err
+	for _, rawJunction := range rawJunctions {
+		graph.Junctions = append(graph.Junctions, junctionFromJSON(rawJunction, graph.Config))
+
+	}
 }
 
-/*
-UnmarshalJSON - implements Unmarshaler.UnmarshalJSON
-Cannot use default implementation because network nodes are referenced by id
-and we want them to be referenced directly in the Network object
-*/
-func (network *Network) UnmarshalJSON(s []byte) error {
-	var x map[string]*json.RawMessage
-	json.Unmarshal(s, &x)
-	config = &configuration{}
-	if err := json.Unmarshal(*x["config"], config); err != nil {
-		log.Fatal(err.Error())
-	}
-	if err := json.Unmarshal(*x["nodes"], &network.Nodes); err != nil {
-		log.Fatal(err.Error())
-	}
-	for _, node := range network.Nodes {
-		node.Tracks = make(map[trackKey][]Track)
-		node.m = &sync.Mutex{}
-	}
+func (graph *Graph) loadTracks(raw json.RawMessage) {
 	var rawTracks []map[string]*json.RawMessage
-	if err := json.Unmarshal(*x["tracks"], &rawTracks); err != nil {
-		log.Fatal(err.Error())
+	if err := json.Unmarshal(raw, &rawTracks); err != nil {
+		log.Panicln("Unable to unmarshal track data: ", err)
 	}
-	network.Tracks = make(map[trackKey2D][]Track)
+	graph.Tracks = make(map[TrackKeyType][]Track)
 	for _, rawTrack := range rawTracks {
-		var track Track
-		if len(rawTrack) == 4 {
-			track = waitTrackFromJSON(rawTrack, network.Nodes)
-		} else if len(rawTrack) == 5 {
-			track = transitTrackFromJSON(rawTrack, network.Nodes)
-		}
-		ends := track.EndPoints()
-		network.Tracks[trackKey2D{ends[0].ID, ends[1].ID}] =
-			append(network.Tracks[trackKey2D{ends[0].ID, ends[1].ID}], track)
-		network.Tracks[trackKey2D{ends[1].ID, ends[0].ID}] =
-			append(network.Tracks[trackKey2D{ends[0].ID, ends[1].ID}], track)
+		track := trackFromJSON(rawTrack, graph.Junctions, graph.Config)
+		a := track.A().ID
+		b := track.B().ID
+		track.A().Tracks[b] = append(track.A().Tracks[b], track)
+		track.B().Tracks[a] = append(track.B().Tracks[a], track)
+		graph.Tracks[TrackKeyType{a, b}] = append(graph.Tracks[TrackKeyType{a, b}], track)
+		graph.Tracks[TrackKeyType{b, a}] = append(graph.Tracks[TrackKeyType{a, b}], track)
 	}
+}
 
+func (graph *Graph) loadStations(raw json.RawMessage) {
 	var rawStations []map[string]*json.RawMessage
-	if err := json.Unmarshal(*x["stations"], &rawStations); err != nil {
-		log.Fatal(err.Error())
+	if err := json.Unmarshal(raw, &rawStations); err != nil {
+		log.Panicln("Unable to unmarshal station data: ", err)
 	}
 	for _, rawStation := range rawStations {
-		network.Stations = append(network.Stations, stationFromJSON(rawStation, network.Nodes))
+		graph.Stations = append(graph.Stations, stationFromJSON(rawStation, graph.Junctions))
 	}
+}
 
+func (graph *Graph) loadVehicles(raw json.RawMessage) {
 	var rawVehicles []map[string]*json.RawMessage
-	if err := json.Unmarshal(*x["vehicles"], &rawVehicles); err != nil {
-		log.Fatal(err.Error())
+	if err := json.Unmarshal(raw, &rawVehicles); err != nil {
+		log.Panicln("Unable to unmarshal vehicle data: ", err)
 	}
-
 	for _, rawVehicle := range rawVehicles {
-		network.Vehicles = append(network.Vehicles,
-			vehicleFromJSON(rawVehicle, network.Nodes))
+		graph.Vehicles = append(graph.Vehicles, vehicleFromJSON(rawVehicle, graph))
 	}
-	return nil
-}	
+}
