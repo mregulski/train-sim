@@ -3,7 +3,8 @@ package main
 import (
 	network "github.com/mregulski/ppt-6-concurrent/network"
 	"log"
-	"sync"
+	"fmt"
+	"time"
 )
 
 func main() {
@@ -14,35 +15,30 @@ func main() {
 	} else {
 		graph = net
 	}
-	log.Printf("%+v\n", graph.Config)
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
-	go graph.InfoHandler()
+	fmt.Printf("%+v\n", graph.Config)
 
+	fmt.Printf("\n----------\nJunctions\n----------\n")
 	for _, junction := range graph.Junctions {
-		wg.Add(1)
-		go network.Handle(junction, graph)
+		fmt.Printf("%v, station: %s\n", junction, graph.StationWith(junction))
 	}
 
-    visited := make(map[network.TrackKeyType]bool)
-	for k, tracks := range graph.Tracks {
-        if (visited[network.TrackKeyType{k.A,k.B}] || visited[network.TrackKeyType{k.B,k.A}]) {
-            continue
-        }
-		for _, track := range tracks {
-			wg.Add(1)
-			go network.Handle(track, graph)
-		}
-        visited[k] = true
+	fmt.Printf("\n----------\nStations\n----------\n")
+	for _, station := range graph.Stations {
+		fmt.Printf("%v\n", station)
 	}
 
-
-	for i := 0; i < len(graph.Vehicles); i++ {
-		wg.Add(1)
-		go graph.Vehicles[i].Handle(graph)
+	fmt.Printf("\n----------\nTracks\n----------\n")
+	for _, track := range graph.Tracks() {
+			fmt.Printf("%v\n", track)
 	}
 
-	// go graph.Vehicles[5].Handle(graph)
-	wg.Wait()
+	fmt.Printf("\n----------\nVehicles\n----------\n")
+	for _, vehicle := range graph.Vehicles {
+			fmt.Printf("%v\n", vehicle)
+	}
+
+	fmt.Printf("\n\n====================================\nStarting simulation\n====================================\n\n")
+	<-time.After(time.Second)
+	graph.Start()
 }
 

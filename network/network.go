@@ -2,43 +2,102 @@ package network
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
-	"fmt"
 )
 
-type TrackKeyType struct {
+type trackKeyType struct {
 	A, B int
 }
 
 type report struct {
 	delta int
-	key string
+	key   string
 }
+
 // Graph is the entire simulated network
 type Graph struct {
-	Config    *GraphConfig
-	Junctions []*Junction
-	Tracks    map[TrackKeyType][]Track
-	Stations  []*Station
-	Vehicles  []Vehicle
-	Emergency chan emergency
-	emergencyCtr chan report
-
+	Config        *graphConfig
+	Junctions     []*Junction
+	tracks        map[trackKeyType][]Track
+	Stations      map[string]*Station
+	StationLookup map[int]*Station
+	Vehicles      []Vehicle
+	Emergency     chan emergency
+	emergencyCtr  chan report
 }
 
-type requestHandler interface {
-	GetRequestChannel() chan<- request
-	GetRWRequestChannel() chan request
-}
-
-// GraphConfig stores general configuration settings of the simulated network
-type GraphConfig struct {
+// graphConfig stores general configuration settings of the simulated network
+type graphConfig struct {
 	TimeScale   float64 // number of milliseconds per simulated hour
 	RepairTime  float64 // in hours
 	FailureRate float64 // probability of a network element failure per hour
+	Tasks       taskConfig
+}
+
+type requestHandler interface {
+	getRequestChannel() chan<- request
+	getRWRequestChannel() chan request
+}
+
+/*
+Start beging the simulation
+*/
+func (graph *Graph) Start() {
+	rand.Seed(time.Now().UnixNano())
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go graph.statsHandler()
+
+	for _, junction := range graph.Junctions {
+		wg.Add(1)
+		go Handle(junction, graph)
+	}
+
+	for _, track := range graph.Tracks() {
+		wg.Add(1)
+		go Handle(track, graph)
+	}
+	// for i := 0; i < len(graph.Vehicles); i++ {
+	// 	wg.Add(1)
+	// 	go graph.Vehicles[i].Handle(graph)
+	// }
+	graph.Vehicles[5].Handle(graph)
+
+	for _, station := range graph.Stations {
+		wg.Add(1)
+		go station.Handle(graph)
+	}
+	wg.Wait()
+}
+
+/*
+StationWith returns a Station that contains junction j
+*/
+func (graph *Graph) StationWith(j *Junction) Station {
+	return *graph.StationLookup[j.ID]
+}
+
+/*
+Tracks provide a slice of all unique tracks in the graph
+*/
+func (graph *Graph) Tracks() []Track {
+	visited := make(map[trackKeyType]bool)
+	uniqueTracks := []Track{}
+	for k, entry := range graph.tracks {
+		if (visited[trackKeyType{k.A, k.B}] || visited[trackKeyType{k.B, k.A}]) {
+			continue
+		}
+		for _, track := range entry {
+			uniqueTracks = append(uniqueTracks, track)
+		}
+		visited[k] = true
+	}
+	return uniqueTracks
 }
 
 func (graph *Graph) scaledTime(hours float64) time.Duration {
@@ -53,24 +112,33 @@ func (graph *Graph) repairTime() time.Duration {
 	return graph.scaledTime(graph.Config.RepairTime)
 }
 
-// generateFailures randomly generates a failure event once an hour until it receives
-// a signal on stop channel
-func (graph *Graph) generateFailures(accident chan<- request, stop <-chan bool) {
+// generateFailures randomly treis to generate a failure every hour, until it succeeds
+func (graph *Graph) generateFailures(accident chan<- bool) {
 	ticker := time.NewTicker(graph.scaledTime(1.0))
 	<-time.After(graph.scaledTime(2.0))
 	for {
-		select {
-		case <-ticker.C:
-			if rand.Float64() < graph.Config.FailureRate {
-				accident <- request{nil, -1, fail}
-			}
-		case <-stop:
+		<-ticker.C
+		if rand.Float64() < graph.Config.FailureRate {
+			accident <- true
 			return
 		}
 	}
 }
 
-func (graph *Graph) InfoHandler() {
+func (graph *Graph) generateTasks(tasks chan<- task, stop <-chan bool) {
+	ticker := time.NewTicker(graph.scaledTime(1.0))
+	<-time.After(graph.scaledTime(2.0))
+	for {
+
+		<-ticker.C
+		if rand.Float64() < graph.Config.Tasks.Rate {
+			tasks <- graph.Config.Tasks.randomTask()
+		}
+
+	}
+}
+
+func (graph *Graph) statsHandler() {
 	graph.emergencyCtr = make(chan report)
 	status := make(map[string]struct{})
 	activeEmergencies := 0
@@ -90,7 +158,6 @@ func (graph *Graph) InfoHandler() {
 	}
 }
 
-
 // LoadGraph loads a Graph description from a JSON file
 func LoadGraph(filename string) (*Graph, error) {
 	raw, err := ioutil.ReadFile(filename)
@@ -104,16 +171,6 @@ func LoadGraph(filename string) (*Graph, error) {
 	return &graph, nil
 }
 
-func (graph *Graph) allTracks() []Track {
-	list := make([]Track, 0)
-	for _, tracks := range graph.Tracks {
-		for _, track := range tracks {
-			list = append(list, track)
-		}
-	}
-	return list
-}
-
 func (graph *Graph) UnmarshalJSON(s []byte) error {
 
 	var raw map[string]json.RawMessage
@@ -121,11 +178,14 @@ func (graph *Graph) UnmarshalJSON(s []byte) error {
 	if err := json.Unmarshal(raw["config"], &graph.Config); err != nil {
 		log.Panicln("Unable to unmarshal config data: ", err)
 	}
+	graph.Emergency = make(chan emergency)
+	graph.StationLookup = make(map[int]*Station)
+
 	graph.loadJunctions(raw["junctions"])
 	graph.loadTracks(raw["tracks"])
 	graph.loadStations(raw["stations"])
 	graph.loadVehicles(raw["vehicles"])
-	graph.Emergency = make(chan emergency)
+
 	return nil
 }
 
@@ -145,15 +205,15 @@ func (graph *Graph) loadTracks(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &rawTracks); err != nil {
 		log.Panicln("Unable to unmarshal track data: ", err)
 	}
-	graph.Tracks = make(map[TrackKeyType][]Track)
+	graph.tracks = make(map[trackKeyType][]Track)
 	for _, rawTrack := range rawTracks {
 		track := trackFromJSON(rawTrack, graph.Junctions, graph.Config)
 		a := track.A().ID
 		b := track.B().ID
 		track.A().Tracks[b] = append(track.A().Tracks[b], track)
 		track.B().Tracks[a] = append(track.B().Tracks[a], track)
-		graph.Tracks[TrackKeyType{a, b}] = append(graph.Tracks[TrackKeyType{a, b}], track)
-		graph.Tracks[TrackKeyType{b, a}] = append(graph.Tracks[TrackKeyType{a, b}], track)
+		graph.tracks[trackKeyType{a, b}] = append(graph.tracks[trackKeyType{a, b}], track)
+		graph.tracks[trackKeyType{b, a}] = append(graph.tracks[trackKeyType{b, a}], track)
 	}
 }
 
@@ -162,8 +222,12 @@ func (graph *Graph) loadStations(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &rawStations); err != nil {
 		log.Panicln("Unable to unmarshal station data: ", err)
 	}
+	graph.Stations = make(map[string]*Station)
 	for _, rawStation := range rawStations {
-		graph.Stations = append(graph.Stations, stationFromJSON(rawStation, graph.Junctions))
+		station := stationFromJSON(rawStation, graph.Junctions)
+		graph.Stations[station.name] = station
+		graph.StationLookup[station.A.ID] = station
+		graph.StationLookup[station.B.ID] = station
 	}
 }
 

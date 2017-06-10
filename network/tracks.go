@@ -7,15 +7,21 @@ import (
 	"math/rand"
 )
 
+/*
+Track defines common functionality for all kinds of tracks
+*/
 type Track interface {
 	Location
 	A() *Junction
 	B() *Junction
 	id() string
+	oppositeEnd(*Junction) *Junction
 }
 
-// baseTrack is a base struct representing a bidirectional track from a to b.
-// Should be extended by concrete types.
+/*
+baseTrack is a base struct representing a bidirectional track from a to b.
+Should be extended by concrete types.
+*/
 type baseTrack struct {
 	basePosition
 	a   *Junction
@@ -31,9 +37,20 @@ func (track *baseTrack) B() *Junction {
 	return track.b
 }
 
-func (track *baseTrack) Occupied() bool {
-	return track.occupant != -1
+func (track *baseTrack) oppositeEnd(of *Junction) *Junction {
+	if of == track.a {
+		return track.b
+	} else if of == track.b {
+		return track.a
+	}
+	log.Panicf("baseTrack.oppositeEnd: %d is not an end of %s (%d and %d are)",
+		of.ID, track.Name(), track.a.ID, track.b.ID)
+	return nil // not reachable due to log.Panicf, but tools complain
 }
+
+// func (track *baseTrack) Occupied() bool {
+// 	return track.occupant != -1
+// }
 
 // Name - implements Position.Name
 func (track *baseTrack) Name() string {
@@ -48,15 +65,9 @@ func (track *baseTrack) neighbours() []Location {
 	return []Location{track.a, track.b}
 }
 
-func findFreeTrack(tracks []Track) Track {
+func chooseTrack(tracks []Track) Track {
 	idx := rand.Intn(len(tracks))
 	return tracks[idx]
-	// for _, track := range tracks {
-	// 	// if !track.Occupied() {
-	// 	// 	return track
-	// 	// }
-	// }
-	// return nil
 }
 
 // WaitTrack is a Track with constant time of traversal, independent on the Vehicle's speed
@@ -65,7 +76,7 @@ type WaitTrack struct {
 	WaitTime float64
 }
 
-// TravelTime - implements Position.TravelTime
+//  e - implements Position.TravelTime
 func (wt *WaitTrack) TravelTime(speed float64) float64 {
 	return wt.WaitTime
 }
@@ -93,7 +104,7 @@ func (tt *TransitTrack) String() string {
 		tt._id, tt.a.ID, tt.b.ID, tt.Length, tt.MaxSpeed)
 }
 
-func trackFromJSON(raw map[string]*json.RawMessage, junctions []*Junction, config *GraphConfig) Track {
+func trackFromJSON(raw map[string]*json.RawMessage, junctions []*Junction, config *graphConfig) Track {
 	var kind string
 	var track Track
 	json.Unmarshal(*raw["type"], &kind)
@@ -109,7 +120,7 @@ func trackFromJSON(raw map[string]*json.RawMessage, junctions []*Junction, confi
 }
 
 func transitTrackFromJSON(raw map[string]*json.RawMessage, junctions []*Junction,
-	config *GraphConfig) *TransitTrack {
+	config *graphConfig) *TransitTrack {
 
 	var a int
 	var b int
@@ -126,7 +137,7 @@ func transitTrackFromJSON(raw map[string]*json.RawMessage, junctions []*Junction
 }
 
 func waitTrackFromJSON(raw map[string]*json.RawMessage, junctions []*Junction,
-	config *GraphConfig) *WaitTrack {
+	config *graphConfig) *WaitTrack {
 
 	var a int
 	var b int

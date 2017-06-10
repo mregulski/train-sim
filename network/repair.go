@@ -3,13 +3,47 @@ package network
 import (
 	"container/heap"
 	"encoding/json"
-	"time"
 	"fmt"
+	"time"
 )
 
 type RepairVehicle struct {
-	BaseVehicle
+	baseVehicle
 	Base *WaitTrack
+}
+
+func (rv *RepairVehicle) String() string {
+	return fmt.Sprintf("Repair{maxSpeed: %f, base: %s}", rv.maxSpeed, rv.Base.Name())
+}
+
+func (rv *RepairVehicle) travelTo(location Location, from Location, reserve bool, ctx *Graph) Location {
+	success := false
+	var start = from
+	var blocked Location
+	var blacklist = []Location{}
+	for !success {
+		rv.logf("[Repair] Calculating shortest path to %s", location.Name())
+		path := rv.findPath(start, location, ctx, blacklist)
+		if len(path) == 0 {
+			rv.logf("[Repair] Already close enough for repairs")
+			success = true
+			continue
+		}
+		if reserve {
+			rv.reserve(path)
+		}
+		rv.logf("[Repair] Path reserved")
+
+		start, blocked, success = rv.travelByPath(path, ctx)
+		if !success {
+			rv.logf("[Repair] Path blocked, retrying from %s", start.Name())
+			rv.release(path)
+			blacklist = []Location{blocked}
+		} else {
+			blacklist = []Location{}
+		}
+	}
+	return start
 }
 
 func (rv *RepairVehicle) Handle(context *Graph) {
@@ -21,71 +55,33 @@ func (rv *RepairVehicle) Handle(context *Graph) {
 			queue <- report
 		}
 	}(accidents)
-
+	rv.moveTo(rv.Base, nil, context)
+	rv.logf("Arrived at base (%s)", rv.Base.Name())
 	for {
 		accident := <-accidents
 		if accident.location == rv.Base {
 			rv.repair(accident.location, context)
 			continue
 		}
-		success := false
-		var path []Location
-		var start Location = rv.Base
-		for !success {
-			rv.logf("[Repair] Calculating shortest path to %s", accident.location.Name())
-			path = rv.findPath(start, accident.location, context, []Location{})
-			if len(path) == 0 {
-				rv.logf("[Repair] Already close enough for repairs")
-				success = true
-				continue
-			}
-			// rv.reserve(path)
-			rv.logf("[Repair] Path reserved")
-			start, success = rv.travelByPath(path, context)
-			if !success {
-				rv.logf("[Repair] Path blocked, retrying from %s", start.Name())
-				// rv.release(path)
-			}
-		}
+		var repairLocation = rv.travelTo(accident.location, rv.Base, true, context)
 		rv.logf("[Repair] Arrived at target location %s, beginning repair", accident.location.Name())
 		rv.repair(accident.handler, context)
-		if len(path) > 0 {
-			rv.logf("[Repair] Repair done, returning to base")
-
-			for !success {
-				rv.logf("[Repair] Calculating shortest path to %s", accident.location.Name())
-				path = rv.findPath(start, accident.location, context, []Location{})
-				if len(path) == 0 {
-					rv.logf("[Repair] Already close enough for repairs")
-					success = true
-					continue
-				}
-				// rv.reserve(path)
-				rv.logf("[Repair] Path reserved")
-				start, success = rv.travelByPath(path, context)
-				if !success {
-					rv.logf("[Repair] Path blocked, retrying from %s", start.Name())
-					// rv.release(path)
-				}
-			}
-			rv.logf("[Repair] returned to base")
-		} else {
-			rv.logf("[Repair] Repair done")
-		}
+		rv.travelTo(rv.Base, repairLocation, false, context)
+		rv.logf("[Repair] Repair done")
 	}
 }
 
-func (rv *RepairVehicle) travelByPath(path []Location, context *Graph) (Location, bool) {
+func (rv *RepairVehicle) travelByPath(path []Location, context *Graph) (Location, Location, bool) {
 	var lastLoc = path[0]
 
 	for _, loc := range path {
-		if rv.moveTo(loc, context) {
+		if rv.moveTo(loc, lastLoc, context) {
 			lastLoc = loc
 		} else {
-			return lastLoc, false
+			return lastLoc, loc, false
 		}
 	}
-	return lastLoc, true
+	return nil, lastLoc, true
 }
 
 func (rv *RepairVehicle) reserve(path []Location) {
@@ -97,10 +93,10 @@ func (rv *RepairVehicle) reserve(path []Location) {
 }
 
 func (rv *RepairVehicle) release(path []Location) {
-	rv.logf("[Repair] Releasing path")
+	rv.logf("[Repair] Reserving path: %v", path)
 	for _, place := range path {
 		rv.request(place, release)
-		rv.logf("[Repair] Released %s", place.Name())
+		rv.logf("[Repair] Reserved %s", place.Name())
 	}
 }
 
@@ -120,32 +116,37 @@ func (rv *RepairVehicle) repair(target requestHandler, context *Graph) {
 		done := false
 		for !done {
 			rv.request(target, repairStart)
-			rv.logf("[Repair] started repairing Train#%d (%v)", target.ID, context.repairTime())
+			rv.logf("[Repair] started repairing Train#%d (%v)", target.id, context.repairTime())
 			<-time.After(context.repairTime())
 			done = rv.request(target, repairDone)
 		}
-		rv.logf("[Repair] Train#%d is back online", target.ID)
-		context.emergencyCtr <- report{delta: -1, key: fmt.Sprintf("Train#%d", target.ID)}
+		rv.logf("[Repair] Train#%d is back online", target.id)
+		context.emergencyCtr <- report{delta: -1, key: fmt.Sprintf("Train#%d", target.id)}
 	}
 
 }
 
-func (rv *RepairVehicle) moveTo(pos Location, context *Graph) bool {
+/*
+moveTo tries to move rv to pos. Gives up after 5 failed attempts to allow
+trying a different path
+*/
+func (rv *RepairVehicle) moveTo(pos Location, from Location, context *Graph) bool {
 	ok := false
 	ctr := 0
 	for !ok {
-		rv.logf("requesting entry: %s", pos.Name())
+		rv.logf("Requesting entry: %s", pos.Name())
 		ok = rv.request(pos, take)
+
+		if !rv.request(pos, check) {
+			rv.logf("Unexpected emergency in %s, repairing", pos.Name())
+			rv.repair(pos, context)
+		}
+
 		if !ok {
 			ctr++
-			if !rv.request(pos, check) {
-				rv.logf("unexpected emergency in %s, repairing", pos.Name())
-				rv.repair(pos, context)
-			} else {
-				rv.logf("Location unavailable: %s - used by %d",
-					pos.Name(), pos.Occupant())
-				<-time.After(context.waitTime())
-			}
+			delay := context.waitTime()
+			rv.logf("Destination occupied, retrying after %v", delay)
+			<-time.After(delay)
 			if ctr >= 5 {
 				return false
 			}
@@ -153,10 +154,13 @@ func (rv *RepairVehicle) moveTo(pos Location, context *Graph) bool {
 
 	}
 	rv.logf("entered %s", pos.Name())
+	if from != nil { // => it's not the initial setup
+		// todo: sometimes called twice - investigate
+		rv.request(from, free)
+		rv.request(from, release) // ensure, even if route wasn't actually reserved
+		rv.logf("Released %s", pos.Name())
+	}
 	<-time.After(context.scaledTime(pos.TravelTime(rv.maxSpeed)))
-	rv.request(pos, free)
-	rv.request(pos, release)
-	rv.logf("Released %s", pos.Name())
 	return true
 }
 
@@ -165,7 +169,7 @@ func (rv *RepairVehicle) moveTo(pos Location, context *Graph) bool {
 func (rv *RepairVehicle) findPath(source Location, target Location,
 	graph *Graph, blackList []Location) []Location {
 	rv.logf(">>[Repair] blacklist: %v", blackList)
-	queue, items := MakeQueue(graph, blackList)
+	queue, items := makeQueue(graph, blackList)
 	rv.logf(">>[Repair] created queue")
 	rv.logf(">>[Repair] source: %v (%v)", source, items[source])
 	queue.update(items[source], 0)
@@ -183,7 +187,7 @@ func (rv *RepairVehicle) findPath(source Location, target Location,
 		}
 	}
 	path := make([]Location, 0)
-	last := items[target].previous
+	last := items[target].position
 	rv.logf("[Repair: Path] source: %s", source.Name())
 	for last != source {
 		rv.logf("[Repair: Path] last: %s", last.Name())
@@ -198,12 +202,12 @@ func (rv *RepairVehicle) findPath(source Location, target Location,
 }
 
 func repairFromJSON(raw map[string]*json.RawMessage, tracks []Track,
-	config *GraphConfig) *RepairVehicle {
+	config *graphConfig) *RepairVehicle {
 
 	var rv RepairVehicle
 	var id string
 
-	json.Unmarshal(*raw["id"], &rv.ID)
+	json.Unmarshal(*raw["id"], &rv.id)
 	json.Unmarshal(*raw["maxSpeed"], &rv.maxSpeed)
 	json.Unmarshal(*raw["base"], &id)
 	for _, track := range tracks {

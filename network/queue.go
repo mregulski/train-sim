@@ -48,7 +48,7 @@ func (pq *priorityQueue) update(item *item, travelTime float64) {
 	heap.Fix(pq, item.index)
 }
 
-func MakeQueue(graph *Graph, blacklist []Location) (priorityQueue, map[Location]*item) {
+func makeQueue(graph *Graph, blacklist []Location) (priorityQueue, map[Location]*item) {
 	queue := make(priorityQueue, 0)
 	mapping := make(map[Location]*item)
 	for _, junction := range graph.Junctions {
@@ -69,7 +69,7 @@ func MakeQueue(graph *Graph, blacklist []Location) (priorityQueue, map[Location]
 			mapping[junction] = entry
 		}
 	}
-	for _, track := range graph.allTracks() {
+	for _, track := range graph.Tracks() {
 		entry := &item{
 			previous:   nil,
 			position:   track,
